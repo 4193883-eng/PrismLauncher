@@ -44,8 +44,6 @@
 #include <QPixmap>
 #include <QPixmapCache>
 
-#include <optional>
-
 #include "ModDetails.h"
 #include "Resource.h"
 
@@ -61,6 +59,7 @@ class Mod : public Resource {
 
     auto details() const -> const ModDetails&;
     auto name() const -> QString override;
+    auto mod_id() const -> QString;
     auto version() const -> QString;
     auto homepage() const -> QString override;
     auto description() const -> QString;
@@ -71,11 +70,18 @@ class Mod : public Resource {
     auto loaders() const -> QString;
     auto mcVersions() const -> QString;
     auto releaseType() const -> QString;
+    QStringList dependencies() const;
+
+    int requiredByCount() const;
+    int requiresCount() const;
+
+    void setRequiredByCount(int value);
+    void setRequiresCount(int value);
 
     /** Get the intneral path to the mod's icon file*/
     QString iconPath() const { return m_local_details.icon_file; }
     /** Gets the icon of the mod, converted to a QPixmap for drawing, and scaled to size. */
-    [[nodiscard]] QPixmap icon(QSize size, Qt::AspectRatioMode mode = Qt::AspectRatioMode::IgnoreAspectRatio) const;
+    QPixmap icon(QSize size, Qt::AspectRatioMode mode = Qt::AspectRatioMode::IgnoreAspectRatio) const;
     /** Thread-safe. */
     QPixmap setIcon(QImage new_image) const;
 
@@ -83,7 +89,7 @@ class Mod : public Resource {
 
     bool valid() const override;
 
-    [[nodiscard]] int compare(const Resource & other, SortType type) const override;
+    [[nodiscard]] int compare(const Resource& other, SortType type) const override;
     [[nodiscard]] bool applyFilter(QRegularExpression filter) const override;
 
     // Delete all the files of this mod
@@ -103,4 +109,7 @@ class Mod : public Resource {
         bool wasEverUsed = false;
         bool wasReadAttempt = false;
     } mutable m_packImageCacheKey;
+
+    int m_requiredByCount = 0;
+    int m_requiresCount = 0;
 };

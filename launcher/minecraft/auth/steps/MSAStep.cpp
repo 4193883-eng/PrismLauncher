@@ -37,6 +37,7 @@
 
 #include <QAbstractOAuth2>
 #include <QNetworkRequest>
+#include <QNetworkReply>
 #include <QOAuthHttpServerReplyHandler>
 #include <QOAuthOobReplyHandler>
 
@@ -56,13 +57,14 @@ bool isSchemeHandlerRegistered()
     process.waitForFinished();
     QString output = process.readAllStandardOutput().trimmed();
 
-    return output.contains(BuildConfig.LAUNCHER_APP_BINARY_NAME);
+    return output.contains(APPLICATION->desktopFileName());
 
 #elif defined(Q_OS_WIN)
     QString regPath = QString("HKEY_CURRENT_USER\\Software\\Classes\\%1").arg(BuildConfig.LAUNCHER_APP_BINARY_NAME);
     QSettings settings(regPath, QSettings::NativeFormat);
 
-    return settings.contains("shell/open/command/.");
+    const QString registeredRunCommand = settings.value("shell/open/command/.").toString().replace("\\", "/");
+    return registeredRunCommand.contains(QCoreApplication::applicationFilePath());
 #endif
     return true;
 }
@@ -80,6 +82,33 @@ class CustomOAuthOobReplyHandler : public QOAuthOobReplyHandler {
         disconnect(APPLICATION, &Application::oauthReplyRecieved, this, &QOAuthOobReplyHandler::callbackReceived);
     }
     QString callback() const override { return BuildConfig.LAUNCHER_APP_BINARY_NAME + "://oauth/microsoft"; }
+
+   protected:
+    void networkReplyFinished(QNetworkReply* reply) override
+    {
+        if (reply->error() != QNetworkReply::NoError) {
+            qWarning() << "OAuth2 request failed:" << reply->readAll();
+        }
+
+        QOAuthOobReplyHandler::networkReplyFinished(reply);
+    }
+};
+
+class LoggingOAuthHttpServerReplyHandler final : public QOAuthHttpServerReplyHandler {
+    Q_OBJECT
+
+   public:
+    explicit LoggingOAuthHttpServerReplyHandler(QObject* parent = nullptr) : QOAuthHttpServerReplyHandler(parent) {}
+
+   protected:
+    void networkReplyFinished(QNetworkReply* reply) override
+    {
+        if (reply->error() != QNetworkReply::NoError) {
+            qWarning() << "OAuth2 request failed:" << reply->readAll();
+        }
+
+        QOAuthHttpServerReplyHandler::networkReplyFinished(reply);
+    }
 };
 
 MSAStep::MSAStep(AccountData* data, bool silent) : AuthStep(data), m_silent(silent)
@@ -88,7 +117,7 @@ MSAStep::MSAStep(AccountData* data, bool silent) : AuthStep(data), m_silent(sile
     if (QCoreApplication::applicationFilePath().startsWith("/tmp/.mount_") || APPLICATION->isPortable() || !isSchemeHandlerRegistered())
 
     {
-        auto replyHandler = new QOAuthHttpServerReplyHandler(this);
+        auto replyHandler = new LoggingOAuthHttpServerReplyHandler(this);
         replyHandler->setCallbackText(QString(R"XXX(
     <noscript>
       <meta http-equiv="Refresh" content="0; URL=%1" />
@@ -99,29 +128,29 @@ MSAStep::MSAStep(AccountData* data, bool silent) : AuthStep(data), m_silent(sile
     </script>
     )XXX")
                                           .arg(BuildConfig.LOGIN_CALLBACK_URL));
-        oauth2.setReplyHandler(replyHandler);
+        m_oauth2.setReplyHandler(replyHandler);
     } else {
-        oauth2.setReplyHandler(new CustomOAuthOobReplyHandler(this));
+        m_oauth2.setReplyHandler(new CustomOAuthOobReplyHandler(this));
     }
-    oauth2.setAuthorizationUrl(QUrl("https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"));
-    oauth2.setAccessTokenUrl(QUrl("https://login.microsoftonline.com/consumers/oauth2/v2.0/token"));
-    oauth2.setScope("XboxLive.SignIn XboxLive.offline_access");
-    oauth2.setClientIdentifier(m_clientId);
-    oauth2.setNetworkAccessManager(APPLICATION->network().get());
+    m_oauth2.setAuthorizationUrl(QUrl("https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"));
+    m_oauth2.setAccessTokenUrl(QUrl("https://login.microsoftonline.com/consumers/oauth2/v2.0/token"));
+    m_oauth2.setScope("XboxLive.SignIn XboxLive.offline_access");
+    m_oauth2.setClientIdentifier(m_clientId);
+    m_oauth2.setNetworkAccessManager(APPLICATION->network());
 
-    connect(&oauth2, &QOAuth2AuthorizationCodeFlow::granted, this, [this] {
-        m_data->msaClientID = oauth2.clientIdentifier();
+    connect(&m_oauth2, &QOAuth2AuthorizationCodeFlow::granted, this, [this] {
+        m_data->msaClientID = m_oauth2.clientIdentifier();
         m_data->msaToken.issueInstant = QDateTime::currentDateTimeUtc();
-        m_data->msaToken.notAfter = oauth2.expirationAt();
-        m_data->msaToken.extra = oauth2.extraTokens();
-        m_data->msaToken.refresh_token = oauth2.refreshToken();
-        m_data->msaToken.token = oauth2.token();
-        emit finished(AccountTaskState::STATE_WORKING, tr("Got "));
+        m_data->msaToken.notAfter = m_oauth2.expirationAt();
+        m_data->msaToken.extra = m_oauth2.extraTokens();
+        m_data->msaToken.refresh_token = m_oauth2.refreshToken();
+        m_data->msaToken.token = m_oauth2.token();
+        emit finished(AccountTaskState::STATE_WORKING, tr("Got MSA token"));
     });
-    connect(&oauth2, &QOAuth2AuthorizationCodeFlow::authorizeWithBrowser, this, &MSAStep::authorizeWithBrowser);
-    connect(&oauth2, &QOAuth2AuthorizationCodeFlow::requestFailed, this, [this, silent](const QAbstractOAuth2::Error err) {
+    connect(&m_oauth2, &QOAuth2AuthorizationCodeFlow::authorizeWithBrowser, this, &MSAStep::authorizeWithBrowser);
+    connect(&m_oauth2, &QOAuth2AuthorizationCodeFlow::requestFailed, this, [this, silent](const QAbstractOAuth2::Error err) {
         auto state = AccountTaskState::STATE_FAILED_HARD;
-        if (oauth2.status() == QAbstractOAuth::Status::Granted || silent) {
+        if (m_oauth2.status() == QAbstractOAuth::Status::Granted || silent) {
             if (err == QAbstractOAuth2::Error::NetworkError) {
                 state = AccountTaskState::STATE_OFFLINE;
             } else {
@@ -135,16 +164,16 @@ MSAStep::MSAStep(AccountData* data, bool silent) : AuthStep(data), m_silent(sile
         qWarning() << message;
         emit finished(state, message);
     });
-    connect(&oauth2, &QOAuth2AuthorizationCodeFlow::error, this,
+    connect(&m_oauth2, &QOAuth2AuthorizationCodeFlow::error, this,
             [this](const QString& error, const QString& errorDescription, const QUrl& uri) {
                 qWarning() << "Failed to login because" << error << errorDescription;
                 emit finished(AccountTaskState::STATE_FAILED_HARD, errorDescription);
             });
 
-    connect(&oauth2, &QOAuth2AuthorizationCodeFlow::extraTokensChanged, this,
+    connect(&m_oauth2, &QOAuth2AuthorizationCodeFlow::extraTokensChanged, this,
             [this](const QVariantMap& tokens) { m_data->msaToken.extra = tokens; });
 
-    connect(&oauth2, &QOAuth2AuthorizationCodeFlow::clientIdentifierChanged, this,
+    connect(&m_oauth2, &QOAuth2AuthorizationCodeFlow::clientIdentifierChanged, this,
             [this](const QString& clientIdentifier) { m_data->msaClientID = clientIdentifier; });
 }
 
@@ -165,20 +194,15 @@ void MSAStep::perform()
             emit finished(AccountTaskState::STATE_DISABLED, tr("Microsoft user authentication failed - refresh token is empty."));
             return;
         }
-        oauth2.setRefreshToken(m_data->msaToken.refresh_token);
-        oauth2.refreshAccessToken();
+        m_oauth2.setRefreshToken(m_data->msaToken.refresh_token);
+        m_oauth2.refreshAccessToken();
     } else {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)  // QMultiMap param changed in 6.0
-        oauth2.setModifyParametersFunction(
+        m_oauth2.setModifyParametersFunction(
             [](QAbstractOAuth::Stage stage, QMultiMap<QString, QVariant>* map) { map->insert("prompt", "select_account"); });
-#else
-        oauth2.setModifyParametersFunction(
-            [](QAbstractOAuth::Stage stage, QMap<QString, QVariant>* map) { map->insert("prompt", "select_account"); });
-#endif
 
         *m_data = AccountData();
         m_data->msaClientID = m_clientId;
-        oauth2.grant();
+        m_oauth2.grant();
     }
 }
 
