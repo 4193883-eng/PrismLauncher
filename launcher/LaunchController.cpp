@@ -128,9 +128,8 @@ void LaunchController::decideAccount()
 
 LaunchDecision LaunchController::decideLaunchMode()
 {
-        m_actualLaunchMode = LaunchMode::Offline;
-        return LaunchDecision::Continue;
-
+    m_actualLaunchMode = LaunchMode::Offline;
+    return LaunchDecision::Continue;
 }
 
 bool LaunchController::askPlayDemo() const
